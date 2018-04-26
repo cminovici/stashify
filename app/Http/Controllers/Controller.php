@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Conflict;
+use App\File;
 use Elasticsearch\Client;
 use Elasticsearch\Common\Exceptions\Curl\CouldNotConnectToHost;
 use Elasticsearch\Common\Exceptions\MaxRetriesException;
@@ -133,7 +135,49 @@ class Controller extends BaseController
         ];
 
         try {
+
             $result = $this->elasticsearch->search($searchParams);
+
+            if ($result && !empty($appBuckets = $result['aggregations']['app_name']['buckets'])) {
+                foreach ($appBuckets as $appBucket) {
+                    $app = $appBucket['key'];
+                    if (!empty($fileBuckets = $appBucket['commit_changes']['duplicateCount']['buckets'])) {
+                        foreach ($fileBuckets as $fileBucket) {
+                            $fileName = $fileBucket['key'];
+                            if ($fileBucket['duplicateDocuments']['changed_by']['uniques']['value'] > 1
+                                && !empty($commitersBuckets = $fileBucket['duplicateDocuments']['changed_by']['email']['buckets'])
+                            ) {
+
+                                $file       = new File;
+                                $file->app  = $app;
+                                $file->file = $fileName;
+                                $file->save();
+
+                                foreach ($commitersBuckets as $commitersBucket) {
+                                    $commiter = $commitersBucket['key'];
+                                    if (!empty($branchBuckets = $commitersBucket['branch_name']['branch']['buckets'])) {
+                                        foreach ($branchBuckets as $branchBucket) {
+                                            $branch = $branchBucket['key'];
+                                            if (!empty($commits = $branchBucket['info']['hits']['hits'])) {
+                                                foreach ($commits as $commit) {
+                                                    $link = $commit['_source']['changesets']['values'][0]['links']['self'][0]['href'];
+
+                                                    $conflict           = new Conflict;
+                                                    $conflict->commiter = $commiter;
+                                                    $conflict->branch   = $branch;
+                                                    $conflict->link     = $link;
+                                                    $file->conflicts()->save($conflict);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             dd($result);
         } catch (CouldNotConnectToHost $e) {
             $previous = $e->getPrevious();
