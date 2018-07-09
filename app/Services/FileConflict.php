@@ -3,10 +3,12 @@
 namespace App\Services;
 
 use App\Conflict;
+use App\Events\FileConflictFound;
 use App\File;
 use Elasticsearch\Client;
 use Elasticsearch\Common\Exceptions\Curl\CouldNotConnectToHost;
 use Elasticsearch\Common\Exceptions\MaxRetriesException;
+use Illuminate\Database\Eloquent\Model;
 
 class FileConflict
 {
@@ -125,11 +127,11 @@ class FileConflict
      */
     public function getFileConflicts(): array
     {
-        $result       = [];
+        $result = [];
         $searchParams = [
             'index' => 'gitstash',
-            'type'  => 'commits',
-            'body'  => $this->queryDSL
+            'type' => 'commits',
+            'body' => $this->queryDSL
         ];
 
         try {
@@ -155,10 +157,8 @@ class FileConflict
                         if ($fileBucket['duplicateDocuments']['changed_by']['uniques']['value'] > 1
                             && !empty($commitersBuckets = $fileBucket['duplicateDocuments']['changed_by']['email']['buckets'])
                         ) {
-
-                            $file          = File::firstOrCreate(['app' => $app, 'file' => $fileName]);
+                            $file = File::firstOrCreate(['app' => $app, 'file' => $fileName]);
                             $fileConflicts = $file->conflicts;
-
                             foreach ($commitersBuckets as $commitersBucket) {
                                 $commiter = $commitersBucket['key'];
                                 if (!empty($branchBuckets = $commitersBucket['branch_name']['branch']['buckets'])) {
@@ -166,19 +166,19 @@ class FileConflict
                                         $branch = $branchBucket['key'];
                                         if (!empty($commits = $branchBucket['info']['hits']['hits'])) {
                                             foreach ($commits as $commit) {
-                                                $link     = $commit['_source']['changesets']['values'][0]['links']['self'][0]['href'];
+                                                $link = $commit['_source']['changesets']['values'][0]['links']['self'][0]['href'];
                                                 $filtered = $fileConflicts->filter(
-                                                    function ($fileConflict) use ($commiter, $branch, $link) {
+                                                    function ($fileConflict) use ($commiter, $branch, $file) {
                                                         return ($fileConflict->commiter == $commiter
-                                                            && $fileConflict->branch = $branch && $fileConflict->link = $link);
+                                                            && $fileConflict->branch == $branch && $fileConflict->fileId == $file->id);
                                                     }
                                                 );
                                                 if (!$filtered->count()) {
-                                                    $conflict           = new Conflict;
-                                                    $conflict->commiter = $commiter;
-                                                    $conflict->branch   = $branch;
-                                                    $conflict->link     = $link;
-                                                    $file->conflicts()->save($conflict);
+                                                    if ($this->save($file, $commiter, $branch, $link)) {
+//                                                        dd($file->conflicts());
+                                                        event(new FileConflictFound($file));
+                                                        dd();
+                                                    }
                                                 }
                                             }
                                         }
@@ -192,5 +192,14 @@ class FileConflict
         }
 
         dd($conflicts);
+    }
+
+    private function save(File $file, $commiter, $branch, $link): ?Model
+    {
+        $conflict = new Conflict;
+        $conflict->commiter = $commiter;
+        $conflict->branch = $branch;
+        $conflict->link = $link;
+        return $file->conflicts()->save($conflict);
     }
 }

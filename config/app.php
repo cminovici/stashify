@@ -151,6 +151,7 @@ return [
          * Package Service Providers...
          */
         Jenssegers\Mongodb\MongodbServiceProvider::class,
+        Snowfire\Beautymail\BeautymailServiceProvider::class,
 
         /*
          * Application Service Providers...
