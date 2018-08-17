@@ -8,6 +8,7 @@ use App\File;
 use Elasticsearch\Client;
 use Elasticsearch\Common\Exceptions\Curl\CouldNotConnectToHost;
 use Elasticsearch\Common\Exceptions\MaxRetriesException;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 
 class FileConflict
@@ -148,6 +149,7 @@ class FileConflict
 
     public function parseAndSaveResult(array $conflicts)
     {
+        $newConflicts = new Collection();
         if ($conflicts && !empty($appBuckets = $conflicts['aggregations']['app_name']['buckets'])) {
             foreach ($appBuckets as $appBucket) {
                 $app = $appBucket['key'];
@@ -155,35 +157,36 @@ class FileConflict
                     foreach ($fileBuckets as $fileBucket) {
                         $fileName = $fileBucket['key'];
                         if ($fileBucket['duplicateDocuments']['changed_by']['uniques']['value'] > 1
-                            && !empty($commitersBuckets = $fileBucket['duplicateDocuments']['changed_by']['email']['buckets'])
+                            && !empty($committerBuckets = $fileBucket['duplicateDocuments']['changed_by']['email']['buckets'])
                         ) {
                             $file = File::firstOrCreate(['app' => $app, 'file' => $fileName]);
                             $fileConflicts = $file->conflicts;
-                            foreach ($commitersBuckets as $commitersBucket) {
-                                $commiter = $commitersBucket['key'];
-                                if (!empty($branchBuckets = $commitersBucket['branch_name']['branch']['buckets'])) {
+                            foreach ($committerBuckets as $committerBucket) {
+                                $committer = $committerBucket['key'];
+                                if (!empty($branchBuckets = $committerBucket['branch_name']['branch']['buckets'])) {
                                     foreach ($branchBuckets as $branchBucket) {
                                         $branch = $branchBucket['key'];
                                         if (!empty($commits = $branchBucket['info']['hits']['hits'])) {
                                             foreach ($commits as $commit) {
                                                 $link = $commit['_source']['changesets']['values'][0]['links']['self'][0]['href'];
-                                                $filtered = $fileConflicts->filter(
-                                                    function ($fileConflict) use ($commiter, $branch, $file) {
-                                                        return ($fileConflict->commiter == $commiter
-                                                            && $fileConflict->branch == $branch && $fileConflict->fileId == $file->id);
-                                                    }
-                                                );
-                                                if (!$filtered->count()) {
-                                                    if ($this->save($file, $commiter, $branch, $link)) {
-//                                                        dd($file->conflicts());
-                                                        event(new FileConflictFound($file));
-                                                        dd();
-                                                    }
+                                                if (!$fileConflicts->contains('committer', $committer)) {
+                                                    $newConflicts->push(['committer' => $committer, 'branch' => $branch, 'link' => $link]);
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
+
+                            if ($newConflicts->isNotEmpty()) {
+                                $newConflicts = $newConflicts->unique(function ($item) {
+                                    return $item['committer'];
+                                })->each(function ($item) use ($file) {
+                                    $this->save($file, $item);
+                                });
+                                // @todo move event after we finish processing
+                                // @todo should verify against db data
+                                event(new FileConflictFound($file));
                             }
                         }
                     }
@@ -194,12 +197,10 @@ class FileConflict
         dd($conflicts);
     }
 
-    private function save(File $file, $commiter, $branch, $link): ?Model
+    private function save(File $file, $item): ?Model
     {
         $conflict = new Conflict;
-        $conflict->commiter = $commiter;
-        $conflict->branch = $branch;
-        $conflict->link = $link;
+        $conflict->fill($item);
         return $file->conflicts()->save($conflict);
     }
 }

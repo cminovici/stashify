@@ -33,7 +33,7 @@ class SendConflictNotification implements ShouldQueue
         $this->release(5);
 
         $to = $event->file->conflicts->map(function ($conflict){
-            return $conflict->commiter;
+            return $conflict->committer;
         });
 
         Mail::to($to->unique()->values()->all())
